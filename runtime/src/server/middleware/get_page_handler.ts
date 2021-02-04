@@ -18,6 +18,7 @@ import {
 import App from '@sapper/internal/App.svelte';
 import { PageContext, PreloadResult } from '@sapper/common';
 import detectClientOnlyReferences from './detect_client_only_references';
+import {createHash} from "crypto"
 
 export function get_page_handler(
 	manifest: Manifest,
@@ -34,6 +35,26 @@ export function get_page_handler(
 	const has_service_worker = fs.existsSync(path.join(build_dir, 'service-worker.js'));
 
 	const { pages, error: error_route } = manifest;
+
+	let api_map = {
+		server_path: null,
+		client_path: null,
+		urls: {}
+	}
+
+	function sha256(string, url_safe=true) {
+		string = createHash("sha256").update(string).digest("base64")
+		if (url_safe)
+			string = string.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+		return string
+	}
+
+	function prefix_server_path(url, basepath) {
+		return path.join("__sapper__/export/", basepath, "/client/", url);
+	}
+	function prefix_client_path(url, basepath) {
+		return path.join(basepath, "/client/", url);
+	}
 
 	function bail(res: SapperResponse, err: Error | string) {
 		console.error(err);
@@ -127,7 +148,7 @@ export function get_page_handler(
 			error: (statusCode: number, message: Error | string) => {
 				preload_error = { statusCode, message };
 			},
-			fetch: (url: string, opts?: any) => {
+			fetch: async (url: string, opts: any = {}) => {
 				const protocol = req.socket.encrypted ? 'https' : 'http';
 				const parsed = new URL.URL(url, `${protocol}://127.0.0.1:${process.env.PORT}${req.baseUrl ? req.baseUrl + '/' :''}`);
 
@@ -164,7 +185,43 @@ export function get_page_handler(
 					}
 				}
 
-				return fetch(parsed.href, opts);
+				// This is only triggered on the server that prepares static
+				// files during `sapper export`
+				let promise = fetch(parsed.href, opts)
+				let is_get = (!opts.method || opts.method === "GET")
+
+				if (process.env.SAPPER_EXPORT && is_get) {
+					let response = await promise
+					let content_type = response.headers.get("content-type")
+					if (content_type.includes("json") && !api_map.urls[parsed.href]) {
+						if (api_map.server_path)
+							fs.unlinkSync(api_map.server_path)
+						else
+							fs.mkdirSync(prefix_server_path("api/", req.baseUrl), {recursive: true})
+
+						let res_clone = response.clone()
+						let res_contents = await response.text()
+						let res_filename = "api/" + sha256(res_contents) + ".json"
+						let res_server_path = prefix_server_path(res_filename, req.baseUrl)
+						let res_client_path = prefix_client_path(res_filename, req.baseUrl)
+						fs.writeFileSync(res_server_path, res_contents)
+
+						api_map.urls[parsed.href] = res_client_path
+
+						let map_contents = "window.api_map = " + JSON.stringify(api_map.urls, null, 2)
+						let map_filename = "api/map." + sha256(map_contents) + ".js"
+						let map_server_path = prefix_server_path(map_filename, req.baseUrl)
+						let map_client_path = prefix_client_path(map_filename, req.baseUrl)
+						fs.writeFileSync(map_server_path, map_contents)
+
+						api_map.server_path = map_server_path
+						api_map.client_path = map_client_path
+
+						return res_clone
+					}
+				}
+
+				return promise
 			}
 		};
 
@@ -375,9 +432,11 @@ export function get_page_handler(
 				styles = (css && css.code ? `<style${nonce_attr}>${css.code}</style>` : '');
 			}
 
+			let api_map_script = api_map.client_path ? `<script src="${api_map.client_path}" defer></script>` : ""
+
 			const body = template()
 				.replace('%sapper.base%', () => `<base href="${req.baseUrl}/">`)
-				.replace('%sapper.scripts%', () => `<script${nonce_attr}>${script}</script>`)
+				.replace('%sapper.scripts%', () => `${api_map_script}<script${nonce_attr}>${script}</script>`)
 				.replace('%sapper.html%', () => html)
 				.replace('%sapper.head%', () => head)
 				.replace('%sapper.styles%', () => styles)

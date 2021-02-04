@@ -24,6 +24,12 @@ import { PageContext } from '@sapper/common';
 import goto from './goto';
 import { page_store } from './stores';
 
+declare global {
+	interface Window {
+		api_map?: Record<string, string>;
+	}
+}
+
 declare const __SAPPER__;
 export const initial_data: InitialData = typeof __SAPPER__ !== 'undefined' && __SAPPER__;
 
@@ -194,7 +200,12 @@ export async function hydrate_target(dest: Target): Promise<HydratedTarget> {
 	const props = { error: null, status: 200, segments: [segments[0]] };
 
 	const preload_context = {
-		fetch: (url: string, opts?: any) => fetch(url, opts),
+		fetch: (url: string, opts: any = {}) => {
+			if (window.api_map && (!opts.method || opts.method === "GET"))
+				url = window.api_map[url] || url
+
+			return fetch(url, opts)
+		},
 		redirect: (statusCode: number, location: string) => {
 			if (redirect && (redirect.statusCode !== statusCode || redirect.location !== location)) {
 				throw new Error('Conflicting redirects');
